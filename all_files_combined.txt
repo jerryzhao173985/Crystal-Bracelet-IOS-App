@@ -1,0 +1,1344 @@
+
+================================================================================
+FILE: test.py
+--------------------------------------------------------------------------------
+import os
+
+output_filename = "all_files_combined.txt"
+
+with open(output_filename, 'w', encoding='utf-8') as outfile:
+    for foldername, subfolders, filenames in os.walk("."):
+        for filename in filenames:
+            file_path = os.path.join(foldername, filename)
+            if file_path == f"./{output_filename}":
+                continue  # Skip the output file itself
+            try:
+                with open(file_path, 'r', encoding='utf-8') as infile:
+                    relative_path = os.path.relpath(file_path, start='.')
+                    outfile.write(f"\n{'='*80}\n")
+                    outfile.write(f"FILE: {relative_path}\n")
+                    outfile.write(f"{'-'*80}\n")
+                    outfile.write(infile.read())
+                    outfile.write(f"\n{'='*80}\n\n")
+            except Exception as e:
+                print(f"Could not read {file_path}: {e}")
+
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/CrystalBraceletIOSApp.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+@main
+struct CrystalBraceletIOSAppApp: App {
+    @StateObject private var braceletVM = BraceletViewModel()
+    @StateObject private var analysisVM = AnalysisViewModel()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environmentObject(braceletVM)
+                .environmentObject(analysisVM)
+        }
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/ViewModels/AnalysisViewModel.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+@MainActor
+final class AnalysisViewModel: ObservableObject {
+    @Published var analysisText: String = ""
+    @Published var ratios: AnalysisResponse.RatioContainer? = nil
+    @Published var isLoading = false
+
+    // User inputs
+    @Published var dob = ""      // YYYY‑MM‑DD
+    @Published var birthTime = "" // HH:mm
+    @Published var gender = ""   // male | female
+    @Published var deepseekKey = ""
+    @Published var openaiKey  = ""
+
+    func analyse() async {
+        guard !dob.isEmpty, !birthTime.isEmpty, !gender.isEmpty,
+              !deepseekKey.isEmpty, !openaiKey.isEmpty else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let req = AstrologyRequest(dob: dob, birthTime: birthTime, gender: gender, deepseekKey: deepseekKey, openaiKey: openaiKey)
+            let resp = try await AstrologyService.analyse(req)
+            analysisText = resp.analysis
+            ratios = resp.ratios
+        } catch {
+            print("Astrology API error: \(error)")
+        }
+    }
+
+    // Clipboard copy
+    func copyReport() {
+        guard let ratios else { return }
+        let report = ["analysis": analysisText, "ratios": ratios] as [String : Any]
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: .prettyPrinted),
+           let str = String(data: data, encoding: .utf8) {
+            UIPasteboard.general.string = str
+        }
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/ViewModels/BraceletViewModel.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+import Combine
+
+@MainActor
+final class BraceletViewModel: ObservableObject {
+    // MARK: - Published State
+    @Published var beads: [Bead] = []              // palette beads
+    @Published var bracelet: [Bead] = []           // user bracelet (≤ MAX_BEADS)
+    @Published var numBeads: Int = 10 { didSet { regenerateBracelet() } }
+    @Published var isAnimating = false
+    @Published var growthAnimating = false
+    @Published var speed: Double = 1.0             // 0.5…2.0
+
+    // MARK: - Constants
+    let MAX_BEADS = 20
+
+    // MARK: - Dependencies
+    private var cancellables = Set<AnyCancellable>()
+
+    init() {
+        Task { await fetchPalette() }
+    }
+
+    // MARK: - Network
+    func fetchPalette() async {
+        do {
+            let raw: [ServerBead] = try await APIService.shared.get("api/beads", decodeTo: [ServerBead].self)
+            await MainActor.run {
+                self.beads = raw.map { Bead(colorHex: $0.color) }
+            }
+        } catch {
+            print("Palette fetch error: \(error)")
+        }
+    }
+
+    // MARK: - Bracelet Generation & Editing --------------------------------------------------
+    func regenerateBracelet(defaultColor: String = "#CCCCCC") {
+        bracelet = Array(repeating: Bead(colorHex: defaultColor), count: numBeads)
+    }
+
+    func setColor(_ hex: String, at index: Int) {
+        guard bracelet.indices.contains(index) else { return }
+        bracelet[index].colorHex = hex
+    }
+
+    func swapBeads(at i: Int, and j: Int) {
+        guard bracelet.indices.contains(i), bracelet.indices.contains(j) else { return }
+        bracelet.swapAt(i, j)
+    }
+
+    // MARK: - Randomisation based on goal ratios ---------------------------------------------
+    func randomise(for ratio: ElementRatio, colors: AnalysisResponse.ElementColors) {
+        bracelet = generateBeadArray(n: numBeads, goal: ratio, colors: colors)
+    }
+
+    private func generateBeadArray(n: Int, goal: ElementRatio, colors: AnalysisResponse.ElementColors) -> [Bead] {
+        let elems: [(Double, String)] = [
+            (goal.metal, colors.metal), (goal.wood, colors.wood), (goal.water, colors.water),
+            (goal.fire,  colors.fire),  (goal.earth, colors.earth)
+        ]
+        // 1. Calc float counts
+        var counts: [(Int, String, Double)] = elems.map { (percentage, hex) in
+            let f = percentage * Double(n) / 100.0
+            return (Int(floor(f)), hex, f - floor(f))
+        }
+        // 2. Adjust diff
+        var diff = n - counts.reduce(0) { $0 + $1.0 }
+        counts.sort { $0.2 > $1.2 } // sort by remainder desc
+        var idx = 0
+        while diff > 0 {
+            counts[idx].0 += 1; diff -= 1; idx = (idx + 1) % counts.count
+        }
+        // 3. Build beads
+        var arr: [Bead] = []
+        counts.forEach { (cnt, hex, _) in arr.append(contentsOf: Array(repeating: Bead(colorHex: hex), count: cnt)) }
+        // 4. Shuffle
+        arr.fisherYatesShuffle()
+        // 5. Pad
+        while arr.count < n { arr.append(Bead(colorHex: "#CCCCCC")) }
+        return arr
+    }
+
+    // MARK: - Flash Randomise Animation -------------------------------------------------------
+    func flashRandomise(goal: ElementRatio, colors: AnalysisResponse.ElementColors) {
+        guard !isAnimating else { return }
+        isAnimating = true
+        let iterations = 25
+        Task {
+            for i in 0..<iterations {
+                try await Task.sleep(for: .milliseconds(Int(200 / speed)))
+                randomise(for: goal, colors: colors)
+                if i == iterations - 1 { isAnimating = false }
+            }
+        }
+    }
+
+    // MARK: - Growth Animation ----------------------------------------------------------------
+    func growBracelet(goal: ElementRatio, colors: AnalysisResponse.ElementColors) {
+        guard !growthAnimating else { return }
+        growthAnimating = true
+        bracelet = []
+        Task {
+            for len in 1...MAX_BEADS {
+                bracelet = generateBeadArray(n: len, goal: goal, colors: colors)
+                try await Task.sleep(for: .milliseconds(Int(5000.0 / Double(MAX_BEADS - 1) / speed)))
+            }
+            growthAnimating = false
+        }
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Assets.xcassets/Contents.json
+--------------------------------------------------------------------------------
+{
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Assets.xcassets/AppIcon.appiconset/Contents.json
+--------------------------------------------------------------------------------
+{
+  "images" : [
+    {
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "dark"
+        }
+      ],
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "tinted"
+        }
+      ],
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Assets.xcassets/AccentColor.colorset/Contents.json
+--------------------------------------------------------------------------------
+{
+  "colors" : [
+    {
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Models/Bead.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+struct Bead: Identifiable, Hashable {
+    /// Client‑side unique ID – guarantees ForEach stability even if server gives duplicates
+    let id = UUID()
+    var colorHex: String   // #RRGGBB
+    var color: Color { Color(hex: colorHex) }
+}
+
+/// Raw object exactly as returned by `/api/beads` (id: Int, color: String)
+struct ServerBead: Decodable {
+    let id: Int
+    let color: String
+}
+
+// 2.2 ElementRatio.swift
+struct ElementRatio: Codable, Hashable {
+    var metal:  Double
+    var wood:   Double
+    var water:  Double
+    var fire:   Double
+    var earth:  Double
+
+    static let zero = ElementRatio(metal: 0, wood: 0, water: 0, fire: 0, earth: 0)
+}
+
+// 2.3 AnalysisResponse.swift
+struct AnalysisResponse: Codable {
+    var analysis: String
+    var ratios: RatioContainer
+
+    struct RatioContainer: Codable {
+        var current: ElementRatio
+        var goal:    ElementRatio
+        var colors:  ElementColors
+    }
+
+    struct ElementColors: Codable, Hashable {
+        var metal:  String
+        var wood:   String
+        var water:  String
+        var fire:   String
+        var earth:  String
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Utilities/FisherYatesShuffle.swift
+--------------------------------------------------------------------------------
+import Foundation
+
+extension Array where Element: Hashable {
+    mutating func fisherYatesShuffle() {
+        guard count > 1 else { return }
+        for i in indices.dropLast() {
+            let j = Int.random(in: i..<count)
+            if i != j { swapAt(i, j) }
+        }
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Utilities/Color+Hex.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 6: (a,r,g,b) = (255,(int>>16)&0xFF,(int>>8)&0xFF,int&0xFF)
+        case 8: (a,r,g,b) = ((int>>24)&0xFF,(int>>16)&0xFF,(int>>8)&0xFF,int&0xFF)
+        default: (a,r,g,b) = (255,0,0,0)
+        }
+        self.init(.sRGB, red: Double(r)/255, green: Double(g)/255, blue: Double(b)/255, opacity: Double(a)/255)
+    }
+}
+
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Views/BeadView.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+struct BeadView: View {
+    var hex: String
+    var body: some View {
+        Circle()
+            .fill(Color(hex: hex))
+            .frame(width: 36, height: 36)
+            .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 1.5))
+            .shadow(radius: 2)
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Views/BraceletCanvasView.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+struct BraceletCanvasView: View {
+    @EnvironmentObject var braceletVM: BraceletViewModel
+
+    private let radius: CGFloat = 120
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                ForEach(Array(braceletVM.bracelet.enumerated()), id: \.0) { idx, bead in
+                    BeadView(hex: bead.colorHex)
+                        .position(position(for: idx, total: braceletVM.bracelet.count, in: geo.size))
+                        .gesture(DragGesture()
+                                    .onChanged { value in dragState = value.translation }
+                                    .onEnded { value in handleDragEnd(idx: idx, translation: value.translation, in: geo.size) })
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Helpers ------------------------------------------------------------
+    private func position(for index: Int, total: Int, in size: CGSize) -> CGPoint {
+        let angle = CGFloat(index) / CGFloat(total) * 2 * .pi
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        return CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
+    }
+
+    // Simplified drag handling: if dropped near another bead, swap
+    @State private var dragState: CGSize = .zero
+    private func handleDragEnd(idx: Int, translation: CGSize, in size: CGSize) {
+        // Compute nearest bead index to drop location
+        let startPos = position(for: idx, total: braceletVM.bracelet.count, in: size)
+        let endPoint = CGPoint(x: startPos.x + translation.width, y: startPos.y + translation.height)
+        var nearestIdx: Int? = nil
+        var minDist: CGFloat = .infinity
+        for j in braceletVM.bracelet.indices {
+            let p = position(for: j, total: braceletVM.bracelet.count, in: size)
+            let d = hypot(p.x - endPoint.x, p.y - endPoint.y)
+            if d < minDist {
+                minDist = d; nearestIdx = j
+            }
+        }
+        if let j = nearestIdx, j != idx, minDist < 40 { braceletVM.swapBeads(at: idx, and: j) }
+        dragState = .zero
+    }
+}
+
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Views/ElementHistogramView.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+import Charts
+
+struct ElementHistogramView: View {
+    var current: ElementRatio
+    var goal: ElementRatio
+    var colors: AnalysisResponse.ElementColors
+
+    struct Bar: Identifiable { let id = UUID(); var element: String; var type: String; var value: Double; var hex: String }
+
+    var dataset: [Bar] {
+        [
+            ("金", current.metal,  goal.metal,  colors.metal),
+            ("木", current.wood,   goal.wood,   colors.wood),
+            ("水", current.water,  goal.water,  colors.water),
+            ("火", current.fire,   goal.fire,   colors.fire),
+            ("土", current.earth,  goal.earth,  colors.earth)
+        ].flatMap { name, curr, tar, hex in
+            [Bar(element: name, type: "当前", value: curr, hex: hex),
+             Bar(element: name, type: "目标", value: tar, hex: hex)]
+        }
+    }
+
+    var body: some View {
+        Chart(dataset) { bar in
+            BarMark(
+                x: .value("百分比", bar.value),
+                y: .value("五行", bar.element)
+            )
+            .opacity(bar.type == "当前" ? 0.4 : 1.0)
+            .annotation(position: .overlay, alignment: .trailing) {
+                Text("\(Int(bar.value))%")
+                    .font(.caption2)
+                    .foregroundStyle(.primary)
+                    .offset(x: 4)
+            }
+            .foregroundStyle(Color(hex: bar.hex))
+        }
+        .frame(height: 220)
+        .chartXAxis(.hidden)
+        .chartYAxis { AxisMarks(position: .leading) }
+        .padding()
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Views/ContentView.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject var braceletVM: BraceletViewModel
+    @EnvironmentObject var analysisVM: AnalysisViewModel
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 24) {
+                    analysisSection
+                    braceletControls
+                    BraceletCanvasView()
+                        .frame(width: 320, height: 320)
+                    animationButtons
+                    if let ratios = analysisVM.ratios {
+                        ElementHistogramView(current: ratios.current, goal: ratios.goal, colors: ratios.colors)
+                            .padding(.horizontal)
+                        AnalysisPanelView(text: analysisVM.analysisText)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("水晶手串定制")
+        }
+    }
+
+    // MARK: - Subviews -----------------------------------------------------------
+    private var analysisSection: some View {
+        GroupBox("命理五行分析") {
+            VStack(alignment: .leading, spacing: 12) {
+                DatePicker("出生日期", selection: Binding(get: {
+                    ISO8601DateFormatter().date(from: analysisVM.dob + "T00:00:00Z") ?? Date()
+                }, set: { date in
+                    analysisVM.dob = date.formatted(.dateTime.year().month().day())
+                }), displayedComponents: .date)
+
+                TextField("出生时间 (HH:mm)", text: $analysisVM.birthTime)
+                    .textFieldStyle(.roundedBorder)
+                Picker("性别", selection: $analysisVM.gender) {
+                    Text("男").tag("male")
+                    Text("女").tag("female")
+                }.pickerStyle(.segmented)
+                SecureField("DeepSeek API Key", text: $analysisVM.deepseekKey)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("OpenAI API Key", text: $analysisVM.openaiKey)
+                    .textFieldStyle(.roundedBorder)
+                let inputsReady = !analysisVM.dob.isEmpty && !analysisVM.birthTime.isEmpty && !analysisVM.gender.isEmpty && !analysisVM.deepseekKey.isEmpty && !analysisVM.openaiKey.isEmpty
+                    Button(analysisVM.isLoading ? "分析中…" : (inputsReady ? "开始分析" : "填写完整信息")) {
+                        Task { await analysisVM.analyse() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!inputsReady || analysisVM.isLoading)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(analysisVM.isLoading)
+            }
+        }
+    }
+
+    private var braceletControls: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Stepper(value: $braceletVM.numBeads, in: 1...braceletVM.MAX_BEADS) {
+                Text("珠子数量: \(braceletVM.numBeads)")
+            }
+            .disabled(braceletVM.isAnimating || braceletVM.growthAnimating)
+            Slider(value: $braceletVM.speed, in: 0.5...2.0, step: 0.1) {
+                Text("速度")
+            }
+            .frame(width: 120)
+            Text("\(braceletVM.speed, specifier: "%.1f")×").font(.subheadline)
+        }
+    }
+
+    private var animationButtons: some View {
+        HStack(spacing: 16) {
+            Button("随机排珠") {
+                if let r = analysisVM.ratios {
+                    braceletVM.randomise(for: r.goal, colors: r.colors)
+                }
+            }
+            .disabled(analysisVM.ratios == nil)
+            .buttonStyle(.borderedProminent)
+
+            Button(braceletVM.isAnimating ? "动画中…" : "闪动动画") {
+                if let r = analysisVM.ratios {
+                    braceletVM.flashRandomise(goal: r.goal, colors: r.colors)
+                }
+            }
+            .disabled(braceletVM.isAnimating || braceletVM.growthAnimating || analysisVM.ratios == nil)
+
+            Button(braceletVM.growthAnimating ? "增长中…" : "增长动画") {
+                if let r = analysisVM.ratios {
+                    braceletVM.growBracelet(goal: r.goal, colors: r.colors)
+                }
+            }
+            .disabled(braceletVM.isAnimating || braceletVM.growthAnimating || analysisVM.ratios == nil)
+        }
+    }
+}
+
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Views/AnalysisPanelView.swift
+--------------------------------------------------------------------------------
+import SwiftUI
+import MarkdownUI
+
+struct AnalysisPanelView: View {
+    @EnvironmentObject var analysisVM: AnalysisViewModel
+    var text: String
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("分析报告").font(.headline)
+                Spacer()
+                Button(action: { analysisVM.copyReport() }) { Image(systemName: "doc.on.doc") }
+            }
+            ScrollView {
+                Markdown(text)
+                    .markdownTheme(.gitHub)          // replaces deprecated .markdownStyle
+                    .font(.system(size: 14))
+            }
+            .frame(maxHeight: expanded ? .infinity : 180)
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .black, location: 0),
+                    .init(color: .black, location: expanded ? 1 : 0.85),
+                    .init(color: .clear, location: expanded ? 1 : 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            Button(expanded ? "收起" : "展开全文") { withAnimation { expanded.toggle() } }
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Services/APIService.swift
+--------------------------------------------------------------------------------
+import Foundation
+
+struct APIService {
+    static let shared = APIService()
+    private init() {}
+    
+    enum APIError: Error { case invalidURL, nonHTTPResponse, badStatus(Int), notJson }
+    
+    private func validate(_ response: URLResponse, data: Data, url: URL) throws {
+        guard let http = response as? HTTPURLResponse else { throw APIError.nonHTTPResponse }
+        #if DEBUG
+        print("↩️ \(http.statusCode) \(url.absoluteString)")
+        if let ct = http.value(forHTTPHeaderField: "Content-Type") { print("   content-type: \(ct)") }
+        #endif
+        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+        if let ct = http.value(forHTTPHeaderField: "Content-Type"), !ct.contains("application/json") {
+            if let html = String(data: data, encoding: .utf8) {
+                print("⚠️ Unexpected non‑JSON (first 200 chars):", html.prefix(200))
+            }
+            throw APIError.notJson
+        }
+        guard (200..<300).contains(http.statusCode) else { throw APIError.badStatus(http.statusCode) }
+        if let ct = http.value(forHTTPHeaderField: "Content-Type"), !ct.contains("application/json") {
+            if let html = String(data: data, encoding: .utf8) { print("Unexpected HTML response:", html.prefix(200)) }
+            throw APIError.notJson
+        }
+    }
+    
+    func get<T: Decodable>(_ path: String, decodeTo type: T.Type) async throws -> T {
+        guard let url = URL(string: baseURL)?.appendingPathComponent(path) else { throw APIError.invalidURL }
+        let (data, resp) = try await URLSession.shared.data(from: url)
+        try validate(resp, data: data, url: url)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+    
+    func post<T: Decodable, Body: Encodable>(_ path: String, body: Body, decodeTo type: T.Type) async throws -> T {
+        guard let url = URL(string: baseURL)?.appendingPathComponent(path) else { throw APIError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        try validate(resp, data: data, url: url)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+    
+    // MARK: - Configuration
+    var baseURL: String = "https://crystal-bracelet-customization.vercel.app" // ← Replace / env
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS/Services/AstrologyService.swift
+--------------------------------------------------------------------------------
+import Foundation
+
+struct AstrologyRequest: Encodable {
+    var dob: String      // YYYY‑MM‑DD
+    var birthTime: String // HH:mm
+    var gender: String    // "male" | "female"
+    var deepseekKey: String
+    var openaiKey: String
+}
+
+struct AstrologyService {
+    static func analyse(_ req: AstrologyRequest) async throws -> AnalysisResponse {
+        try await APIService.shared.post("api/astro", body: req, decodeTo: AnalysisResponse.self)
+    }
+}
+
+================================================================================
+
+
+================================================================================
+FILE: .git/config
+--------------------------------------------------------------------------------
+[core]
+	bare = false
+	repositoryformatversion = 0
+	filemode = true
+	ignorecase = true
+	precomposeunicode = true
+	logallrefupdates = true
+
+================================================================================
+
+
+================================================================================
+FILE: .git/HEAD
+--------------------------------------------------------------------------------
+ref: refs/heads/main
+
+================================================================================
+
+
+================================================================================
+FILE: .git/description
+--------------------------------------------------------------------------------
+Unnamed repository; edit this file 'description' to name the repository.
+
+================================================================================
+
+
+================================================================================
+FILE: .git/index
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/COMMIT_EDITMSG
+--------------------------------------------------------------------------------
+Initial Commit
+
+================================================================================
+
+
+================================================================================
+FILE: .git/objects/5a/03fd2792a98da8925903d44ced3aec8c7c1c28
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/9c/5041e27bf84221f3784d984490a006e2f1d37f
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/d9/c19cc17a1d6452956495c8f392c3673f08a9eb
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/df/d626824414729d64b0defe4d66671adc1830ec
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/ae/ded49c45971513aea53aedff7892a891c2ec39
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/eb/8789700816459c1e1480e0b34781d9fb78a1ca
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/7c/889ff98e8c23b4a564a8cc6e4f4d3943f40003
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/73/c00596a7fca3f3d4bdd64053b69d86745f9e10
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/91/9434a6254f0e9651f402737811be6634a03e9c
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/65/e558ee61a704f437ba0e126ecd59f3e01836bb
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/3a/33721dda7cf69b67b5012b17e7764a87d8a342
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/98/6bd324c26d854187559f27f8194c8afd1795ac
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/d3/f53babbd6331847510d3271b2e5cc88e9af363
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/a0/bbe02988c9a4a4eb4835e46448f75011617d79
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/cc/a6261cb644f39bdeeb79290b5d51c57d6837ab
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/e6/cc3e72797a90898ac96e3f8c40ff6b49004945
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/c2/52e2a0d5d10ff420af6049df64861d477af0b0
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/23/05880107db52fdcc2a49e2cd1cd14ced699c85
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/objects/40/64b1764decda4b141ff47563d499607c6eafbe
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: .git/info/exclude
+--------------------------------------------------------------------------------
+.DS_Store
+UserInterfaceState.xcuserstate
+================================================================================
+
+
+================================================================================
+FILE: .git/logs/HEAD
+--------------------------------------------------------------------------------
+0000000000000000000000000000000000000000 5a03fd2792a98da8925903d44ced3aec8c7c1c28 Jerry Zhao <jerryzhao173985@gmail.com> 1744995837 +0100	commit (initial): Initial Commit
+
+================================================================================
+
+
+================================================================================
+FILE: .git/logs/refs/heads/main
+--------------------------------------------------------------------------------
+0000000000000000000000000000000000000000 5a03fd2792a98da8925903d44ced3aec8c7c1c28 Jerry Zhao <jerryzhao173985@gmail.com> 1744995837 +0100	commit (initial): Initial Commit
+
+================================================================================
+
+
+================================================================================
+FILE: .git/hooks/README.sample
+--------------------------------------------------------------------------------
+#!/bin/sh
+#
+# Place appropriately named executable hook scripts into this directory
+# to intercept various actions that git takes.  See `git help hooks` for
+# more information.
+
+================================================================================
+
+
+================================================================================
+FILE: .git/refs/heads/main
+--------------------------------------------------------------------------------
+5a03fd2792a98da8925903d44ced3aec8c7c1c28
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS.xcodeproj/project.pbxproj
+--------------------------------------------------------------------------------
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		C4925F002DB2C0AD0023CAEA /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = C4925EFF2DB2C0AD0023CAEA /* MarkdownUI */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		C4925EC62DB2BD7B0023CAEA /* CrystalBraceletIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CrystalBraceletIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		C4925EC82DB2BD7B0023CAEA /* CrystalBraceletIOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CrystalBraceletIOS;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C4925EC32DB2BD7B0023CAEA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C4925F002DB2C0AD0023CAEA /* MarkdownUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		C4925EBD2DB2BD7B0023CAEA = {
+			isa = PBXGroup;
+			children = (
+				C4925EC82DB2BD7B0023CAEA /* CrystalBraceletIOS */,
+				C4925EC72DB2BD7B0023CAEA /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C4925EC72DB2BD7B0023CAEA /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C4925EC62DB2BD7B0023CAEA /* CrystalBraceletIOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C4925EC52DB2BD7B0023CAEA /* CrystalBraceletIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C4925ED12DB2BD7C0023CAEA /* Build configuration list for PBXNativeTarget "CrystalBraceletIOS" */;
+			buildPhases = (
+				C4925EC22DB2BD7B0023CAEA /* Sources */,
+				C4925EC32DB2BD7B0023CAEA /* Frameworks */,
+				C4925EC42DB2BD7B0023CAEA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C4925EC82DB2BD7B0023CAEA /* CrystalBraceletIOS */,
+			);
+			name = CrystalBraceletIOS;
+			packageProductDependencies = (
+				C4925EFF2DB2C0AD0023CAEA /* MarkdownUI */,
+			);
+			productName = CrystalBraceletIOS;
+			productReference = C4925EC62DB2BD7B0023CAEA /* CrystalBraceletIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C4925EBE2DB2BD7B0023CAEA /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1630;
+				LastUpgradeCheck = 1630;
+				TargetAttributes = {
+					C4925EC52DB2BD7B0023CAEA = {
+						CreatedOnToolsVersion = 16.3;
+					};
+				};
+			};
+			buildConfigurationList = C4925EC12DB2BD7B0023CAEA /* Build configuration list for PBXProject "CrystalBraceletIOS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = C4925EBD2DB2BD7B0023CAEA;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C4925EFE2DB2C0AD0023CAEA /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C4925EC72DB2BD7B0023CAEA /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C4925EC52DB2BD7B0023CAEA /* CrystalBraceletIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C4925EC42DB2BD7B0023CAEA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C4925EC22DB2BD7B0023CAEA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C4925ECF2DB2BD7C0023CAEA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = J499J9G858;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C4925ED02DB2BD7C0023CAEA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = J499J9G858;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		C4925ED22DB2BD7C0023CAEA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = J499J9G858;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jerry.CrystalBraceletIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C4925ED32DB2BD7C0023CAEA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = J499J9G858;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jerry.CrystalBraceletIOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C4925EC12DB2BD7B0023CAEA /* Build configuration list for PBXProject "CrystalBraceletIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4925ECF2DB2BD7C0023CAEA /* Debug */,
+				C4925ED02DB2BD7C0023CAEA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C4925ED12DB2BD7C0023CAEA /* Build configuration list for PBXNativeTarget "CrystalBraceletIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4925ED22DB2BD7C0023CAEA /* Debug */,
+				C4925ED32DB2BD7C0023CAEA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C4925EFE2DB2C0AD0023CAEA /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jerryzhao173985/swift-markdown-ui";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C4925EFF2DB2C0AD0023CAEA /* MarkdownUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C4925EFE2DB2C0AD0023CAEA /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
+			productName = MarkdownUI;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C4925EBE2DB2BD7B0023CAEA /* Project object */;
+}
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS.xcodeproj/xcuserdata/jerry.xcuserdatad/xcschemes/xcschememanagement.plist
+--------------------------------------------------------------------------------
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SchemeUserState</key>
+	<dict>
+		<key>CrystalBraceletIOS.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>0</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+--------------------------------------------------------------------------------
+<?xml version="1.0" encoding="UTF-8"?>
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "self:">
+   </FileRef>
+</Workspace>
+
+================================================================================
+
+
+================================================================================
+FILE: CrystalBraceletIOS.xcodeproj/project.xcworkspace/xcuserdata/jerry.xcuserdatad/UserInterfaceState.xcuserstate
+--------------------------------------------------------------------------------
+
+================================================================================
+FILE: CrystalBraceletIOS.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+--------------------------------------------------------------------------------
+{
+  "originHash" : "928ad259752f906caea71a423aee829a648d4e8d5a9c5fdabb23acd08427cf72",
+  "pins" : [
+    {
+      "identity" : "networkimage",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gonzalezreal/NetworkImage",
+      "state" : {
+        "revision" : "2849f5323265386e200484b0d0f896e73c3411b9",
+        "version" : "6.0.1"
+      }
+    },
+    {
+      "identity" : "swift-cmark",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-cmark",
+      "state" : {
+        "revision" : "b022b08312decdc46585e0b3440d97f6f22ef703",
+        "version" : "0.6.0"
+      }
+    },
+    {
+      "identity" : "swift-markdown-ui",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jerryzhao173985/swift-markdown-ui",
+      "state" : {
+        "branch" : "main",
+        "revision" : "a9c7615fb50323069c2979c69263973aa1b24a8f"
+      }
+    }
+  ],
+  "version" : 3
+}
+
+================================================================================
+
