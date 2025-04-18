@@ -38,6 +38,17 @@ final class BraceletViewModel: ObservableObject {
     func regenerateBracelet(defaultColor: String = "#CCCCCC") {
         bracelet = Array(repeating: Bead(colorHex: defaultColor), count: numBeads)
     }
+    
+    /// Resize bracelet while preserving existing colours where possible.
+//    private func resizeBracelet(to newCount: Int, defaultColor: String = "#CCCCCC") {
+//        if newCount > bracelet.count {
+//            // append blanks
+//            bracelet.append(contentsOf: Array(repeating: Bead(colorHex: defaultColor), count: newCount - bracelet.count))
+//        } else if newCount < bracelet.count {
+//            // truncate
+//            bracelet = Array(bracelet.prefix(newCount))
+//        }
+//    }
 
     func setColor(_ hex: String, at index: Int) {
         guard bracelet.indices.contains(index) else { return }
