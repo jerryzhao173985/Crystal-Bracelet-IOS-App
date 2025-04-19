@@ -10,7 +10,7 @@ This document chronicles the migration of a Crystal Bracelet Customiser web appl
     * [1. High-level Architecture](#1-high-level-architecture)
     * [2. Client-side Data Flow](#2-client-side-data-flow)
 * [1. Backend (Vercel)](#1-backend-vercel)
-* [2. iOS App — Entry & Infrastructure](#2-ios-app--entry--infrastructure)
+* [2. iOS App - Entry and Infrastructure](#2-ios-app---entry-and-infrastructure)
 * [3. Model Layer](#3-model-layer)
 * [4. View-Models (business logic)](#4-view-models-business-logic)
     * [4.1 BraceletViewModel.swift](#41-braceletviewmodelswift)
@@ -83,7 +83,7 @@ View updates:
 
 ---
 
-## 2. iOS App — Entry & Infrastructure
+## 2. iOS App - Entry and Infrastructure
 
 | File | Core Content | Why it matters |
 |------|--------------|----------------|
