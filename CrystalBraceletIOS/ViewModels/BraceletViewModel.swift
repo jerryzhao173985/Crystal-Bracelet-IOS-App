@@ -39,6 +39,26 @@ final class BraceletViewModel: ObservableObject {
         bracelet = Array(repeating: Bead(colorHex: defaultColor), count: numBeads)
     }
     
+    
+    // MARK: - Remote arrangement (via /api/arrange)
+//    func arrangeViaServer(using ratios: AnalysisResponse.RatioContainer) async {
+//        let req = ArrangeRequest(
+//            numBeads: numBeads,
+//            ratios:   ratios,
+//            seed: Int(Date().timeIntervalSince1970)   // or nil for random
+//        )
+//        do {
+//            let resp = try await ArrangeService.arrange(req)
+//            bracelet = resp.beads.map { Bead(colorHex: $0) }
+//            save()                                    // persist to UserDefaults
+//            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+//        } catch {
+//            print("⚠️ /api/arrange failed → local randomise():", error)
+//            randomise(for: ratios.goal, colors: ratios.colors)
+//        }
+//    }
+
+    
     /// Resize bracelet while preserving existing colours where possible.
 //    private func resizeBracelet(to newCount: Int, defaultColor: String = "#CCCCCC") {
 //        if newCount > bracelet.count {
