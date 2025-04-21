@@ -139,4 +139,26 @@ final class BraceletViewModel: ObservableObject {
             growthAnimating = false
         }
     }
+    
+    
+    func saveCurrentDesign(_ analysisVM: AnalysisViewModel) async {
+        guard let ratios = analysisVM.ratios else { return }
+        let entry = HistoryEntry(
+            id: analysisVM.currentHistoryID ?? UUID(),
+            dob: analysisVM.dob,
+            birthTime: analysisVM.birthTime,
+            gender: analysisVM.gender,
+            numBeads: numBeads,
+            analysis: analysisVM.analysisText,
+            ratios: ratios,
+            beads: bracelet.map(\.colorHex)           // save colours
+        )
+        if let id = analysisVM.currentHistoryID {
+            HistoryStore.shared.upsert(entry)      // overwrite or add
+        } else {
+            HistoryStore.shared.upsert(entry)      // new
+            analysisVM.currentHistoryID = entry.id
+        }
+    }
+
 }

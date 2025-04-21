@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var analysisVM:  AnalysisViewModel
 
     @State private var showHistory = false          // controls the sheet // keep existing sheet
+    @State private var showSettings = false
 
     var body: some View {
 
@@ -26,9 +27,12 @@ struct ContentView: View {
                         .onChange(of: analysisVM.ratios) { newValue in
                             guard let r = newValue else { return }
                             Task {    // regenerate + save history
-                                braceletVM.randomise(for: r.goal, colors: r.colors)
+                                // 1 Re‑colour bracelet ONLY for live runs
+                                if analysisVM.source == .live {
+                                    braceletVM.randomise(for: r.goal, colors: r.colors)
+                                }
                                 
-                                // save only if this is a *live* session
+                                // 2 Save history ONLY for live runs
                                 if analysisVM.source == .live {
                                     let entry = HistoryEntry(
                                         dob:        analysisVM.dob,
@@ -36,12 +40,20 @@ struct ContentView: View {
                                         gender:     analysisVM.gender,
                                         numBeads:   braceletVM.numBeads,
                                         analysis:   analysisVM.analysisText,
-                                        ratios:     r
+                                        ratios:     r,
+                                        beads: nil                     // beads only on manual save
                                     )
-                                    HistoryStore.shared.add(entry)
+                                    HistoryStore.shared.upsert(entry)
+                                    analysisVM.currentHistoryID = entry.id
                                 }
                             }
                         }
+                    
+                    Button("保存当前配色") {
+                        Task { await braceletVM.saveCurrentDesign(analysisVM) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(analysisVM.ratios == nil)
 
                     // 4 Animation buttons
                     animationButtons
@@ -64,13 +76,20 @@ struct ContentView: View {
             
             // ---------- Toolbar button that opens History ----------
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    // History
                     Button {
                         showHistory = true
                     } label: {
                         Image(systemName: "clock.arrow.circlepath")
                     }
                     .accessibilityLabel("历史记录")
+                    // Settings
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                    }
                 }
             }
         }      // NavigationStack
@@ -79,6 +98,10 @@ struct ContentView: View {
         .sheet(isPresented: $showHistory) {
             HistoryView()
                 .environmentObject(braceletVM)
+                .environmentObject(analysisVM)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
                 .environmentObject(analysisVM)
         }
     }

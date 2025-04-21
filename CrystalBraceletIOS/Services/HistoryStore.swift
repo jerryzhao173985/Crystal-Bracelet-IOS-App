@@ -12,7 +12,18 @@ final class HistoryStore: ObservableObject {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         return docs.appendingPathComponent("bracelet_history.json")
     }()
+    
+    // NEW: insert or overwrite, then persist
+    func upsert(_ entry: HistoryEntry) {
+        if let i = items.firstIndex(where: { $0.id == entry.id }) {
+            items[i] = entry
+        } else {
+            items.insert(entry, at: 0)
+        }
+        persist()
+    }
 
+    // existing add(delete:) can remain if you like, or call upsert internally
     // MARK: CRUD
     func add(_ entry: HistoryEntry) {
         items.insert(entry, at: 0)

@@ -20,32 +20,52 @@ struct HistoryView: View {
                                 Text(entry.dob, format: .dateTime.year().month().day())
                                 Text(entry.birthTime).font(.caption)
                                 Text(entry.gender == "male" ? "男" : "女")
-                            }
-                            .font(.caption2)
+                            }.font(.caption2)
 
-                            ColorDotsRow(colors: [entry.ratios.colors.metal,
-                                                  entry.ratios.colors.wood,
-                                                  entry.ratios.colors.water,
-                                                  entry.ratios.colors.fire,
-                                                  entry.ratios.colors.earth])
-//                            Spacer()
-//                            VStack(alignment: .trailing) {
-//                                Text(entry.timestamp, style: .date).font(.caption)
-//                                Text("\(entry.numBeads) beads").font(.caption2)
-//                            }
-//                            .foregroundStyle(.secondary)
+                            ColorDotsRow(colors: [
+                                entry.ratios.colors.metal, entry.ratios.colors.wood,
+                                entry.ratios.colors.water, entry.ratios.colors.fire,
+                                entry.ratios.colors.earth])
 
-                            MicroHistogram(current: entry.ratios.current, goal: entry.ratios.goal)
+                            MicroBarsTwoRows(current: entry.ratios.current, goal: entry.ratios.goal)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 6)
-//                        Add a trailing bead‑count:
                         .overlay(
                             Text("\(entry.numBeads)")
                                 .font(.footnote.monospacedDigit())
                                 .padding(.trailing, 4),
-                            alignment: .trailing
-                        )
+                            alignment: .trailing)
+
+//                        VStack(alignment: .leading, spacing: 4) {
+//                            HStack {
+//                                Text(entry.dob, format: .dateTime.year().month().day())
+//                                Text(entry.birthTime).font(.caption)
+//                                Text(entry.gender == "male" ? "男" : "女")
+//                            }
+//                            .font(.caption2)
+//
+//                            ColorDotsRow(colors: [entry.ratios.colors.metal,
+//                                                  entry.ratios.colors.wood,
+//                                                  entry.ratios.colors.water,
+//                                                  entry.ratios.colors.fire,
+//                                                  entry.ratios.colors.earth])
+////                            Spacer()
+////                            VStack(alignment: .trailing) {
+////                                Text(entry.timestamp, style: .date).font(.caption)
+////                                Text("\(entry.numBeads) beads").font(.caption2)
+////                            }
+////                            .foregroundStyle(.secondary)
+//
+//                            MicroHistogram(current: entry.ratios.current, goal: entry.ratios.goal)
+//                        }
+//                        .frame(maxWidth: .infinity, alignment: .leading)
+//                        .padding(.vertical, 6)
+////                        Add a trailing bead‑count:
+//                        .overlay(
+//                            Text("\(entry.numBeads)")
+//                                .font(.footnote.monospacedDigit())
+//                                .padding(.trailing, 4),
+//                            alignment: .trailing
+//                        )
                     }
                 }
                 .onDelete { store.delete(at: $0) }
@@ -63,10 +83,15 @@ struct HistoryView: View {
         analysisVM.gender    = e.gender
         analysisVM.analysisText = e.analysis
         analysisVM.ratios    = e.ratios
-//        braceletVM.bracelet  = e.beads.map { Bead(colorHex: $0) }
+
+        analysisVM.currentHistoryID = e.id          // remember
         
-        // re‑arrange bracelet colours using stored palette
-        braceletVM.randomise(for: e.ratios.goal, colors: e.ratios.colors)
+        if let saved = e.beads {
+            braceletVM.bracelet = saved.map { Bead(colorHex: $0) }
+        } else {
+            // re‑arrange bracelet colours using stored palette
+            braceletVM.randomise(for: e.ratios.goal, colors: e.ratios.colors)
+        }
     }
 }
 

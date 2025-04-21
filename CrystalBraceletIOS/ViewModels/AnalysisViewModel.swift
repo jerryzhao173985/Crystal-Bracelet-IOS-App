@@ -18,8 +18,31 @@ final class AnalysisViewModel: ObservableObject {
     @Published var gender = ""   // male | female
     @Published var deepseekKey: String = KeychainHelper.shared.read(kDeepSeekKey) ?? ""
     @Published var openaiKey:  String = KeychainHelper.shared.read(kOpenAIKey)  ?? ""
+    @Published var currentHistoryID: UUID? = nil
+    
+    // Customized astro user prompt
+    @Published var promptTemplates: [String:String] = [:]
+    @Published var promptType: String = "basic"
+    @Published var customPrompt: String = ""
+    @Published var customPromptEnabled: Bool = false
+    
+    
+    func loadPromptTemplates() {
+        Task {
+            do {
+                let templates = try await PromptService.fetchTemplates()
+                promptTemplates = templates
+                // default to “basic” if available
+                if templates.keys.contains("basic") { promptType = "basic" }
+            } catch {
+                print("Failed to load prompts:", error)
+            }
+        }
+    }
 
     func analyse() async {
+//        Reset to .live at the start of analyse()
+        source = .live
         guard !birthTime.isEmpty, !gender.isEmpty,
               !deepseekKey.isEmpty, !openaiKey.isEmpty else { return }
 
@@ -32,7 +55,10 @@ final class AnalysisViewModel: ObservableObject {
             birthTime: birthTime,
             gender: gender,
             deepseekKey: deepseekKey,
-            openaiKey: openaiKey
+            openaiKey: openaiKey,
+            promptType: promptType,          // NEW
+            customPrompt: self.customPromptEnabled ?
+                customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil
         )
 
         do {
