@@ -165,18 +165,21 @@ struct HelperEditorView: View {
     @StateObject private var store = JSFileStore.shared
 
     @State private var draft: String = ""
+    @State private var savedSnapshot  = ""   // <-- NEW
+    @State private var saveTask: Task<Void, Never>? // Bonus: modernising the autosave delay
+    
     @State private var newFileName = ""
     @State private var showNewFileSheet = false
     @State private var showRenameSheet = false
 
     @FocusState private var isEditorFocused: Bool
-    
-//    Auto-save every 2 s while typing
-//    (Manual 保存 still persists immediately and resets the red dot.))
-    @State private var autosaveTimer: Timer?
 
     // load draft when selection changes
-    private func refreshDraft() { draft = store.loadCode() }
+    private func refreshDraft() {
+        let text = store.loadCode()
+        draft          = text
+        savedSnapshot  = text                // <-- keep them in sync
+    }
 
     var body: some View {
         NavigationStack {
@@ -195,7 +198,8 @@ struct HelperEditorView: View {
                                 )
                                 .overlay(                           // ● unsaved dot
                                     Group {
-                                        if draft != store.loadCode() && file.id == store.currentID {
+                                        //  ● badge
+                                        if draft != savedSnapshot && file.id == store.currentID {
                                             Circle().fill(Color.red).frame(width:6,height:6)
                                                 .offset(x:10,y:-10)
                                         }
@@ -224,20 +228,26 @@ struct HelperEditorView: View {
                 // ------------ code editor ---------------
                 CodeTextEditor(text: $draft)
                     .focused($isEditorFocused)
-                    .onChange(of: draft) { _ in                  // NEW
-                       autosaveTimer?.invalidate()
-                       autosaveTimer = Timer.scheduledTimer(withTimeInterval: 2,
-                                                            repeats: false) { _ in
-                           store.save(code: draft)              // background save
-                       }
+                    .onChange(of: draft) { newValue in                  // NEW
+                        // cancel any previous 2-second countdown
+                        // Auto-save every 2 s while typing
+                        // (Manual 保存 still persists immediately and resets the red dot.)
+                        saveTask?.cancel()
+                        saveTask = Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(2))
+                            store.save(code: newValue)   // ← write to disk
+                            savedSnapshot = newValue     // ← clear the red dot
+                        }
                    }
             }
             .onAppear { refreshDraft() }
+            .onDisappear { saveTask?.cancel() }
             .navigationTitle("functions.js")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("保存") {
                         store.save(code: draft)
+                        savedSnapshot = draft          // mark clean
                         dismiss()
                     }
                     .disabled(draft == store.loadCode())
