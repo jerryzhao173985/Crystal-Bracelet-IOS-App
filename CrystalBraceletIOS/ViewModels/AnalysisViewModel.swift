@@ -60,7 +60,7 @@ final class AnalysisViewModel: ObservableObject {
             promptType: promptType,
             customPrompt: self.customPromptEnabled ?
                 customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-            file: HelperCodeStore.shared.base64  // the service will send the Base-64 string functions.js
+            file: JSFileStore.shared.base64  // the service will send the Base-64 string functions.js
         )
 
         do {

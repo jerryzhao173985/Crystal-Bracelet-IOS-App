@@ -1,127 +1,285 @@
-// HelperEditorView.swift – standalone SwiftUI editor for functions.js
-// Includes:
-//   • HelperCodeStore  – singleton that manages loading / saving JS text
-//   • HelperEditorView – UI for editing, saving, restoring the code
-//
-// 1.  On first launch we copy Bundle("functions.js") to Application‑Support.
-// 2.  Any edits are persisted to disk; re‑opened app reloads same file.
-// 3.  The AnalysisService reads HelperCodeStore.shared.javascript when
-//     building its request and, if not empty, Base‑64 encodes it into the
-//     JSON payload (key: "file").
-// ---------------------------------------------------------------------
-
 import SwiftUI
+import UniformTypeIdentifiers
+import CryptoKit
 
-// MARK: - HelperCodeStore ------------------------------------------------
+// MARK: - JSFileEntry ----------------------------------------------------
+struct JSFileEntry: Identifiable, Codable, Equatable, Hashable {
+    let id: UUID
+    var name: String
+    var url: URL            // persisted location on disk
+
+    init(name: String, url: URL) {
+        self.id   = UUID()
+        self.name = name
+        self.url  = url
+    }
+}
+
+// MARK: - JSFileStore (multi‑file) --------------------------------------
 @MainActor
-final class HelperCodeStore: ObservableObject {
-    static let shared = HelperCodeStore()
+final class JSFileStore: ObservableObject {
+    static let shared = JSFileStore()
 
-    @Published private(set) var javascript: String = ""       // current text
+    @Published private(set) var files: [JSFileEntry] = []
+    @Published var currentID: UUID?              // selected file
 
-    private let savedURL: URL = {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("functions.js")
+    private let dir: URL = {
+        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let sub = d.appendingPathComponent("helpers", isDirectory: true)
+        try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        return sub
     }()
 
-    private let bundleName = "functions"      // functions.js in main bundle
+    private let defaultsKey = "helperFileList"
 
     private init() {
-        load()                               // load on first access
+        loadFileList()
+        if files.isEmpty { createFirstDefault() }
+        if currentID == nil { currentID = files.first?.id }
     }
 
-    /// load from disk, or copy bundle default
-    private func load() {
-        if FileManager.default.fileExists(atPath: savedURL.path) {
-            javascript = (try? String(contentsOf: savedURL, encoding: .utf8)) ?? ""
-        } else if let bundleURL = Bundle.main.url(forResource: bundleName, withExtension: "js"),
-                  let txt = try? String(contentsOf: bundleURL, encoding: .utf8) {
-            javascript = txt
-            try? txt.write(to: savedURL, atomically: true, encoding: .utf8)
+    // Base‑64 of currently selected file (nil if none)
+    var base64: String? {
+        guard let entry = files.first(where: { $0.id == currentID }),
+              let data  = try? Data(contentsOf: entry.url) else { return nil }
+        return data.base64EncodedString()
+    }
+
+    // MARK: CRUD ---------------------------------------------------------
+    func create(_ initial: String, named name: String) {
+        let fileURL = dir.appendingPathComponent(name + ".js")
+        try? initial.write(to: fileURL, atomically: true, encoding: .utf8)
+        let entry = JSFileEntry(name: name, url: fileURL)
+        files.append(entry)
+        currentID = entry.id
+        persistList()
+    }
+
+    func rename(_ id: UUID, to newName: String) {
+        guard var entry = files.first(where: { $0.id == id }) else { return }
+        let newURL = dir.appendingPathComponent(newName + ".js")
+        try? FileManager.default.moveItem(at: entry.url, to: newURL)
+        entry.name = newName
+        entry.url  = newURL
+        if let idx = files.firstIndex(where: { $0.id == id }) { files[idx] = entry }
+        persistList()
+    }
+
+    func delete(_ ids: IndexSet) {
+        for idx in ids {
+            let entry = files[idx]
+            try? FileManager.default.removeItem(at: entry.url)
+        }
+        files.remove(atOffsets: ids)
+        if currentID == nil || !files.contains(where: { $0.id == currentID }) {
+            currentID = files.first?.id
+        }
+        persistList()
+    }
+
+    func save(code: String) {
+        guard let entry = files.first(where: { $0.id == currentID }) else { return }
+        try? code.write(to: entry.url, atomically: true, encoding: .utf8)
+    }
+
+    func loadCode() -> String {
+        guard let entry = files.first(where: { $0.id == currentID }),
+              let text = try? String(contentsOf: entry.url, encoding: .utf8) else { return "" }
+        return text
+    }
+
+    // MARK: Persist list --------------------------------------------------
+    private func persistList() {
+        let data = try? JSONEncoder().encode(files)
+        UserDefaults.standard.set(data, forKey: defaultsKey)
+    }
+
+    private func loadFileList() {
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let arr  = try? JSONDecoder().decode([JSFileEntry].self, from: data) {
+            files = arr.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+            currentID = files.first?.id
         }
     }
 
-    /// Persist current JS text
-    func save(_ text: String) throws {
-        try text.write(to: savedURL, atomically: true, encoding: .utf8)
-        javascript = text
-    }
-
-    /// Revert to last‑saved disk version
-    func revert() {
-        load()
-    }
-
-    /// Restore original bundle version (discard all edits)
-    func resetToDefault() {
-        if let bundleURL = Bundle.main.url(forResource: bundleName, withExtension: "js"),
-           let txt = try? String(contentsOf: bundleURL, encoding: .utf8) {
-            javascript = txt
-            try? txt.write(to: savedURL, atomically: true, encoding: .utf8)
+    private func createFirstDefault() {
+        if let bundleURL = Bundle.main.url(forResource: "functions", withExtension: "js"),
+           let text = try? String(contentsOf: bundleURL, encoding: .utf8) {
+            create(text, named: "default")
+        } else {
+            create("// write your helper functions here\n", named: "default")
         }
+    }
+}
+
+// MARK: - Syntax‑highlight TextEditor wrapper ---------------------------
+/// Very lightweight JS keyword tinting using AttributedString (iOS 17+).
+struct CodeTextEditor: UIViewRepresentable {
+    @Binding var text: String
+
+    private let keywords = ["function", "return", "const", "let", "var", "=>"]
+
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        tv.autocorrectionType = .no
+        tv.autocapitalizationType = .none
+        tv.delegate = context.coordinator
+        return tv
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if uiView.text != text { uiView.text = text }
+        applyHighlight(to: uiView)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    class Coordinator: NSObject, UITextViewDelegate {
+        var parent: CodeTextEditor
+        init(_ p: CodeTextEditor) { parent = p }
+        func textViewDidChange(_ tv: UITextView) { parent.text = tv.text }
+    }
+
+    private func applyHighlight(to tv: UITextView) {
+        guard let str = tv.text else { return }
+        let attr = NSMutableAttributedString(string: str)
+        let full = NSRange(location: 0, length: (str as NSString).length)
+        attr.addAttribute(.foregroundColor, value: UIColor.label, range: full)
+        for kw in keywords {
+            let regex = try? NSRegularExpression(pattern: "\\b" + kw + "\\b")
+            regex?.enumerateMatches(in: str, range: full) { match, _, _ in
+                if let r = match?.range {
+                    attr.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: r)
+                }
+            }
+        }
+        tv.attributedText = attr
     }
 }
 
 // MARK: - HelperEditorView ----------------------------------------------
 struct HelperEditorView: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var store = HelperCodeStore.shared
+    @StateObject private var store = JSFileStore.shared
 
     @State private var draft: String = ""
-    @State private var showDiscardAlert = false
+    @State private var newFileName = ""
+    @State private var showNewFileSheet = false
+    @State private var showRenameSheet = false
 
-    @FocusState private var isFocused: Bool
+    @FocusState private var isEditorFocused: Bool
+
+    // load draft when selection changes
+    private func refreshDraft() { draft = store.loadCode() }
 
     var body: some View {
         NavigationStack {
-            TextEditor(text: $draft)
-                .font(.system(.body, design: .monospaced))
-                .padding()
-                .focused($isFocused)
-                .onAppear { draft = store.javascript }
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("恢复默认") {
-                            showDiscardAlert = true
+            VStack(spacing: 0) {
+                // ---------- top bar file picker ----------
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(store.files) { file in
+                            Text(file.name)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(file.id == store.currentID ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1))
+                                .cornerRadius(6)
+                                .onTapGesture { store.currentID = file.id; refreshDraft() }
+                                .contextMenu {
+                                    Button("重命名") { newFileName = file.name; showRenameSheet = true; store.currentID = file.id }
+                                    Button("删除", role: .destructive) {
+                                        if let idx = store.files.firstIndex(of: file) {
+                                            store.delete(IndexSet(integer: idx))
+                                            refreshDraft()
+                                        }
+                                    }
+                                }
+                        }
+                        Button(action: { showNewFileSheet = true }) {
+                            Image(systemName: "plus.circle")
                         }
                     }
-                    ToolbarItemGroup(placement: .navigationBarTrailing) {
-                        Button("还原") {
-                            draft = store.javascript
-                            isFocused = false
-                        }
-                        Button("保存") {
-                            try? store.save(draft)
-                            dismiss()
-                        }
-                        .disabled(draft == store.javascript)
-                    }
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button("收起键盘") { isFocused = false }
-                    }
+                    .padding(.horizontal)
                 }
-                .alert("恢复为应用默认?", isPresented: $showDiscardAlert) {
-                    Button("取消", role: .cancel) {}
-                    Button("确定", role: .destructive) {
-                        store.resetToDefault()
-                        draft = store.javascript
+                Divider()
+
+                // ------------ code editor ---------------
+                CodeTextEditor(text: $draft)
+                    .focused($isEditorFocused)
+            }
+            .onAppear { refreshDraft() }
+            .navigationTitle("functions.js")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("保存") {
+                        store.save(code: draft)
+                        dismiss()
                     }
-                } message: {
-                    Text("这将丢弃您所有的自定义函数并恢复为出厂版本。")
+                    .disabled(draft == store.loadCode())
                 }
-                .navigationTitle("functions.js")
+                
+                // — File-size badge —
+                  ToolbarItem(placement: .navigationBarTrailing) {
+                    if let entry = store.files.first(where: { $0.id == store.currentID }),
+                       let vals  = try? entry.url.resourceValues(forKeys: [.fileSizeKey]),
+                       let bytes = vals.fileSize
+                    {
+                      Text(bytes < 1_024 ? "\(bytes) B" : "\(bytes/1_024) KB")
+                        .font(.caption)
+                        .foregroundColor(bytes > 12_288 ? .red : .secondary)
+                    }
+                  }
+                
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("收起键盘") { isEditorFocused = false }
+                }
+            }
+            // New file sheet
+            .alert("新建文件", isPresented: $showNewFileSheet, actions: {
+                TextField("文件名", text: $newFileName)
+                Button("创建") {
+                    let name = newFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !name.isEmpty { store.create("// \(name).js\n", named: name) }
+                    newFileName = ""
+                    refreshDraft()
+                }
+                Button("取消", role: .cancel) { newFileName = "" }
+            }, message: { Text("请输入文件名") })
+            // Rename sheet
+            .alert("重命名", isPresented: $showRenameSheet, actions: {
+                TextField("文件名", text: $newFileName)
+                Button("保存") {
+                    let name = newFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let id = store.currentID, !name.isEmpty { store.rename(id, to: name) }
+                    newFileName = ""; refreshDraft()
+                }
+                Button("取消", role: .cancel) { newFileName = "" }
+            }, message: { Text("输入新的文件名") })
         }
     }
 }
 
-// MARK: - Integration Helpers -------------------------------------------
-extension HelperCodeStore {
-    /// Base‑64 of current JS for JSON transport (\"file\" key)
-    var base64: String? {
-        let data = javascript.data(using: .utf8)
-        return data?.base64EncodedString()
+extension JSFileStore {
+    /// Returns (sha, b64) if file ≤ 12 KB, else nil
+    var payload: (String,String)? {
+        guard let entry = files.first(where: { $0.id == currentID }),
+              let data  = try? Data(contentsOf: entry.url),
+              data.count <= 12_288 else {               // 12 KB hard-cap
+            return nil
+        }
+        let sha = Insecure.SHA1.hash(data: data)         // 20-byte, cheap
+            .map { String(format: "%02hhx", $0) }
+            .joined()
+        return (sha, data.base64EncodedString())
+    }
+}
+
+// MARK: - Preview
+struct HelperEditorView_Previews: PreviewProvider {
+    static var previews: some View {
+        HelperEditorView()
     }
 }
 
