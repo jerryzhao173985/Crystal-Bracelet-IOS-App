@@ -24,10 +24,10 @@ final class JSFileStore: ObservableObject {
     @Published var currentID: UUID?              // selected file
 
     private let dir: URL = {
-        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let sub = d.appendingPathComponent("helpers", isDirectory: true)
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let sub  = docs.appendingPathComponent("helpers", isDirectory: true)
         try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-        return sub
+        return sub                               // ⬅︎ WAS applicationSupport
     }()
 
     private let defaultsKey = "helperFileList"
@@ -80,6 +80,7 @@ final class JSFileStore: ObservableObject {
     func save(code: String) {
         guard let entry = files.first(where: { $0.id == currentID }) else { return }
         try? code.write(to: entry.url, atomically: true, encoding: .utf8)
+        persistList()
     }
 
     func loadCode() -> String {
@@ -169,6 +170,10 @@ struct HelperEditorView: View {
     @State private var showRenameSheet = false
 
     @FocusState private var isEditorFocused: Bool
+    
+//    Auto-save every 2 s while typing
+//    (Manual 保存 still persists immediately and resets the red dot.))
+    @State private var autosaveTimer: Timer?
 
     // load draft when selection changes
     private func refreshDraft() { draft = store.loadCode() }
@@ -183,7 +188,19 @@ struct HelperEditorView: View {
                             Text(file.name)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(file.id == store.currentID ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1))
+                                .background(
+                                    Capsule().fill(file.id == store.currentID
+                                                   ? Color.accentColor.opacity(0.25)
+                                                   : Color.secondary.opacity(0.12))
+                                )
+                                .overlay(                           // ● unsaved dot
+                                    Group {
+                                        if draft != store.loadCode() && file.id == store.currentID {
+                                            Circle().fill(Color.red).frame(width:6,height:6)
+                                                .offset(x:10,y:-10)
+                                        }
+                                    }
+                                )
                                 .cornerRadius(6)
                                 .onTapGesture { store.currentID = file.id; refreshDraft() }
                                 .contextMenu {
@@ -207,6 +224,13 @@ struct HelperEditorView: View {
                 // ------------ code editor ---------------
                 CodeTextEditor(text: $draft)
                     .focused($isEditorFocused)
+                    .onChange(of: draft) { _ in                  // NEW
+                       autosaveTimer?.invalidate()
+                       autosaveTimer = Timer.scheduledTimer(withTimeInterval: 2,
+                                                            repeats: false) { _ in
+                           store.save(code: draft)              // background save
+                       }
+                   }
             }
             .onAppear { refreshDraft() }
             .navigationTitle("functions.js")

@@ -27,6 +27,7 @@ final class AnalysisViewModel: ObservableObject {
     @Published var customPrompt: String = ""
     @Published var customPromptEnabled: Bool = false
     
+    private var lastSentSHA: String?
     
     func loadPromptTemplates() {
         Task {
@@ -50,6 +51,12 @@ final class AnalysisViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
+        var fileB64: String? = nil // ← may be nil, so it’s skipped
+        if let (sha, b64) = JSFileStore.shared.payload, sha != lastSentSHA {
+            fileB64      = b64
+            lastSentSHA  = sha
+        }
+
         let dobString = DateFormatter.serverDate.string(from: dob)   // ← format once
         let req = AstrologyRequest(
             dob: dobString,
@@ -60,7 +67,7 @@ final class AnalysisViewModel: ObservableObject {
             promptType: promptType,
             customPrompt: self.customPromptEnabled ?
                 customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-            file: JSFileStore.shared.base64  // the service will send the Base-64 string functions.js
+            file: fileB64  // JSFileStore.shared.base64  // the service will send the Base-64 string functions.js
         )
 
         do {
