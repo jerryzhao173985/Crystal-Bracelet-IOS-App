@@ -31,6 +31,13 @@ struct SettingsView: View {
                                 analysisVM.customPrompt = ""
                             }
                         }
+                    
+                    // UI hook to JS function editor
+                    NavigationLink {
+                        HelperEditorView()
+                    } label: {
+                        Label("编辑 JavaScript 函数文件", systemImage: "hammer")
+                    }
                 }
 
                 // MARK: Prompt Content Display or Editor

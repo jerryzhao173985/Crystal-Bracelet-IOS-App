@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 private let kDeepSeekKey = "deepseekKey"
 private let kOpenAIKey   = "openaiKey"
@@ -56,9 +57,10 @@ final class AnalysisViewModel: ObservableObject {
             gender: gender,
             deepseekKey: deepseekKey,
             openaiKey: openaiKey,
-            promptType: promptType,          // NEW
+            promptType: promptType,
             customPrompt: self.customPromptEnabled ?
-                customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+                customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+            file: HelperCodeStore.shared.base64  // the service will send the Base-64 string functions.js
         )
 
         do {
