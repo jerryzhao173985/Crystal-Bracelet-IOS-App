@@ -41,7 +41,8 @@ final class AnalysisViewModel: ObservableObject {
             }
         }
     }
-
+    
+    @MainActor   // -- good practice, ensures UI + file ops on main
     func analyse() async {
 //        Reset to .live at the start of analyse()
         source = .live
@@ -51,10 +52,12 @@ final class AnalysisViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        var fileB64: String? = nil // ← may be nil, so it’s skipped
-        if let (sha, b64) = JSFileStore.shared.payload, sha != lastSentSHA {
-            fileB64      = b64
-            lastSentSHA  = sha
+        // -------- helper JS payload (≤12 KB) -----------------
+        let payload = JSFileStore.shared.payload          // (sha,b64) or nil
+        let b64      = payload?.1
+
+        if let sha = payload?.0, sha != lastSentSHA {
+            lastSentSHA = sha            // remember fingerprint we just sent
         }
 
         let dobString = DateFormatter.serverDate.string(from: dob)   // ← format once
@@ -67,7 +70,7 @@ final class AnalysisViewModel: ObservableObject {
             promptType: promptType,
             customPrompt: self.customPromptEnabled ?
                 customPrompt.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
-            file: fileB64  // JSFileStore.shared.base64  // the service will send the Base-64 string functions.js
+            file: b64  // JSFileStore.shared.base64  // the service will send the Base-64 string functions.js
         )
 
         do {

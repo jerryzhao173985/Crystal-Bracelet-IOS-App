@@ -35,9 +35,13 @@ struct SettingsView: View {
                     // UI hook to JS function editor
                     NavigationLink {
                         HelperEditorView()
+                            .environmentObject(analysisVM)      // pass the same instance
                     } label: {
-                        Label("编辑 JavaScript 函数文件", systemImage: "hammer")
+                        Label("编辑 JS 函数文件", systemImage: "hammer")
                     }
+                    .simultaneousGesture(                      // let the link fire first
+                        TapGesture().onEnded { UIApplication.shared.dismissKeyboard() }
+                    )
                 }
 
                 // MARK: Prompt Content Display or Editor
@@ -118,7 +122,8 @@ struct SettingsView: View {
                         .onDelete { presetStore.delete(at: $0) }
                     }
                 }
-            }
+            } // Form
+            
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("设置")
             .toolbar {

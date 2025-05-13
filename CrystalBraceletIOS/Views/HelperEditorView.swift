@@ -115,53 +115,84 @@ final class JSFileStore: ObservableObject {
 
 // MARK: - Syntax‑highlight TextEditor wrapper ---------------------------
 /// Very lightweight JS keyword tinting using AttributedString (iOS 17+).
+/// Very light JavaScript text-editor with keyword tinting.
+/// Highlighting is debounced 120 ms to stay perfectly smooth even on
+/// long files.
 struct CodeTextEditor: UIViewRepresentable {
+
     @Binding var text: String
+    private let keywords = ["function","return","const","let","var","=>"]
 
-    private let keywords = ["function", "return", "const", "let", "var", "=>"]
-
+    // MARK: UIViewRepresentable -----------------------------------------
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        tv.autocorrectionType = .no
+        tv.autocorrectionType     = .no
         tv.autocapitalizationType = .none
         tv.delegate = context.coordinator
+        context.coordinator.applyHighlight(to: tv)          // initial pass
         return tv
     }
 
-    func updateUIView(_ uiView: UITextView, context: Context) {
-        if uiView.text != text { uiView.text = text }
-        applyHighlight(to: uiView)
+    func updateUIView(_ tv: UITextView, context: Context) {
+        if tv.text != text { tv.text = text }
+        context.coordinator.scheduleHighlight(for: tv)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    class Coordinator: NSObject, UITextViewDelegate {
-        var parent: CodeTextEditor
-        init(_ p: CodeTextEditor) { parent = p }
-        func textViewDidChange(_ tv: UITextView) { parent.text = tv.text }
-    }
+    // MARK: Coordinator (debounce + highlighting) -----------------------
+    final class Coordinator: NSObject, UITextViewDelegate {
+        private let parent: CodeTextEditor
+        private var pending: DispatchWorkItem?          // ← debounce token
 
-    private func applyHighlight(to tv: UITextView) {
-        guard let str = tv.text else { return }
-        let attr = NSMutableAttributedString(string: str)
-        let full = NSRange(location: 0, length: (str as NSString).length)
-        attr.addAttribute(.foregroundColor, value: UIColor.label, range: full)
-        for kw in keywords {
-            let regex = try? NSRegularExpression(pattern: "\\b" + kw + "\\b")
-            regex?.enumerateMatches(in: str, range: full) { match, _, _ in
-                if let r = match?.range {
-                    attr.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: r)
+        init(_ parent: CodeTextEditor) { self.parent = parent }
+
+        // UITextViewDelegate
+        func textViewDidChange(_ tv: UITextView) {
+            parent.text = tv.text
+            scheduleHighlight(for: tv)
+        }
+
+        // Public ------------------------------------------------------------------
+        /// Schedules a highlight run 120 ms in the future (debounced).
+        func scheduleHighlight(for tv: UITextView) {
+            pending?.cancel()                                            // drop older job
+            let work = DispatchWorkItem { [weak self, weak tv] in
+                if let tv = tv { self?.applyHighlight(to: tv) }
+            }
+            pending = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        }
+
+        // Private -----------------------------------------------------------------
+        func applyHighlight(to tv: UITextView) {
+            guard let str = tv.text else { return }
+            let attr = NSMutableAttributedString(string: str)
+            let full = NSRange(location: 0, length: (str as NSString).length)
+            attr.addAttribute(.foregroundColor, value: UIColor.label, range: full)
+
+            for kw in parent.keywords {
+                if let rgx = try? NSRegularExpression(pattern: "\\b\(kw)\\b") {
+                    rgx.enumerateMatches(in: str, range: full) { m, _, _ in
+                        if let r = m?.range {
+                            attr.addAttribute(.foregroundColor,
+                                              value: UIColor.systemBlue,
+                                              range: r)
+                        }
+                    }
                 }
             }
+            tv.attributedText = attr
         }
-        tv.attributedText = attr
     }
 }
 
 // MARK: - HelperEditorView ----------------------------------------------
 struct HelperEditorView: View {
     @Environment(\.dismiss) private var dismiss
+//    Inject the API key via @EnvironmentObject
+    @EnvironmentObject var analysisVM: AnalysisViewModel     // ← NEW
     @StateObject private var store = JSFileStore.shared
 
     @State private var draft: String = ""
@@ -173,76 +204,162 @@ struct HelperEditorView: View {
     @State private var showRenameSheet = false
 
     @FocusState private var isEditorFocused: Bool
+    @FocusState private var isPromptFocused: Bool   // NEW
+    
+    @State private var genPrompt       = ""
+    @State private var generating      = false
+    @State private var genError:String? = nil
 
     // load draft when selection changes
     private func refreshDraft() {
-        let text = store.loadCode()
-        draft          = text
-        savedSnapshot  = text                // <-- keep them in sync
+        Task.detached { @MainActor in
+            let text = store.loadCode()
+            draft = text
+            savedSnapshot = text  // <-- keep them in sync
+        }
+    }
+    
+    @MainActor
+    private func generateJS() async {
+        guard !generating else { return }
+        guard !analysisVM.openaiKey.isEmpty else {
+            genError = "请先在设置中输入 OpenAI Key"; return
+        }
+        generating = true; defer { generating = false }
+        do {
+            let code = try await OpenAIService.shared.generateJS(
+                prompt: genPrompt,
+                apiKey: analysisVM.openaiKey   // ← inject via env-object
+            )
+            let name = "gen-\(Date.now.formatted(.dateTime.hour().minute()))"
+            //            "gen-\(Date.now.ISO8601Format(.iso8601(dateSeparator: .dash, timeSeparator: .colon)))"
+            withAnimation(.spring) {
+                store.create(code, named: name)      // open new tab // used in generateJS()
+            }
+            draft = code
+            genPrompt = ""                         // erase the input box
+        } catch {
+            genError = error.localizedDescription  // invoke outside alert
+        }
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                // ---------- top bar file picker ----------
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(store.files) { file in
-                            Text(file.name)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule().fill(file.id == store.currentID
-                                                   ? Color.accentColor.opacity(0.25)
-                                                   : Color.secondary.opacity(0.12))
-                                )
-                                .overlay(                           // ● unsaved dot
-                                    Group {
-                                        //  ● badge
-                                        if draft != savedSnapshot && file.id == store.currentID {
-                                            Circle().fill(Color.red).frame(width:6,height:6)
-                                                .offset(x:10,y:-10)
+            // ───── ZStack lets us place a full-screen tap layer ABOVE the content
+            ZStack {
+                //------------------------------------------------------------------
+                // ORIGINAL PAGE CONTENT (unchanged) -- your VStack with file tabs,
+                // CodeTextEditor, etc.
+                //------------------------------------------------------------------
+                VStack(spacing: 0) {
+                    // ---------- top bar file picker ----------
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(store.files) { file in
+                                Text(file.name)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        Capsule().fill(file.id == store.currentID
+                                                       ? Color.accentColor.opacity(0.25)
+                                                       : Color.secondary.opacity(0.12))
+                                    )
+                                    .overlay(                           // ● unsaved dot
+                                        Group {
+                                            //  ● badge
+                                            if draft != savedSnapshot && file.id == store.currentID {
+                                                Circle().fill(Color.red).frame(width:6,height:6)
+                                                    .offset(x:10,y:-10)
+                                            }
+                                        }
+                                    )
+                                    .cornerRadius(6)
+                                    .onTapGesture { store.currentID = file.id; refreshDraft() }
+                                    .contextMenu {
+                                        Button("重命名") { newFileName = file.name; showRenameSheet = true; store.currentID = file.id }
+                                        Button("删除", role: .destructive) {
+                                            if let idx = store.files.firstIndex(of: file) {
+                                                store.delete(IndexSet(integer: idx))
+                                                refreshDraft()
+                                            }
                                         }
                                     }
-                                )
-                                .cornerRadius(6)
-                                .onTapGesture { store.currentID = file.id; refreshDraft() }
-                                .contextMenu {
-                                    Button("重命名") { newFileName = file.name; showRenameSheet = true; store.currentID = file.id }
-                                    Button("删除", role: .destructive) {
-                                        if let idx = store.files.firstIndex(of: file) {
-                                            store.delete(IndexSet(integer: idx))
-                                            refreshDraft()
-                                        }
-                                    }
-                                }
+                            }
+                            Button(action: { showNewFileSheet = true }) {
+                                Image(systemName: "plus.circle")
+                            }
                         }
-                        Button(action: { showNewFileSheet = true }) {
-                            Image(systemName: "plus.circle")
-                        }
+                        .padding(.horizontal)
                     }
-                    .padding(.horizontal)
+                    .scrollDismissesKeyboard(.interactively)
+                    
+                    Divider()
+                    
+                    CodeTextEditor(text: $draft)
+                        .focused($isEditorFocused)
+                        .onChange(of: draft) { newValue in                  // NEW
+                            // cancel any previous 2-second countdown
+                            // Auto-save every 2 s while typing
+                            // (Manual 保存 still persists immediately and resets the red dot.)
+                            saveTask?.cancel()
+                            saveTask = Task { @MainActor in
+                                try? await Task.sleep(for: .seconds(2))
+                                store.save(code: newValue)   // ← write to disk
+                                savedSnapshot = newValue     // ← clear the red dot
+                            }
+                       }
                 }
-                Divider()
 
-                // ------------ code editor ---------------
-                CodeTextEditor(text: $draft)
-                    .focused($isEditorFocused)
-                    .onChange(of: draft) { newValue in                  // NEW
-                        // cancel any previous 2-second countdown
-                        // Auto-save every 2 s while typing
-                        // (Manual 保存 still persists immediately and resets the red dot.)
-                        saveTask?.cancel()
-                        saveTask = Task { @MainActor in
-                            try? await Task.sleep(for: .seconds(2))
-                            store.save(code: newValue)   // ← write to disk
-                            savedSnapshot = newValue     // ← clear the red dot
+                //------------------------------------------------------------------
+                // BACKDROP TAP LAYER
+                //------------------------------------------------------------------
+                if isEditorFocused || isPromptFocused {
+                    Color.clear
+                        .contentShape(Rectangle())        // make whole sheet tappable
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            isEditorFocused = false
+                            isPromptFocused = false
+                            UIApplication.shared.dismissKeyboard()
                         }
-                   }
-            }
-            .onAppear { refreshDraft() }
-            .onDisappear { saveTask?.cancel() }
+                        .transition(.opacity)
+                }
+
+                //------------------------------------------------------------------
+                // FLOATING “生成” BAR
+                //------------------------------------------------------------------
+                if isEditorFocused || isPromptFocused {
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 8) {
+                            TextField("根据描述生成 JS…", text: $genPrompt, axis: .vertical)
+                                .textFieldStyle(.roundedBorder)
+                                .lineLimit(1...3)
+                                .submitLabel(.done)
+                                .focused($isPromptFocused)
+                                .onSubmit { Task { await generateJS() } }
+
+                            Button { Task { await generateJS() } } label: {
+                                generating ? AnyView(ProgressView()) : AnyView(Text("生成"))
+                            }
+                            .disabled(genPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || generating)
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical,10)
+                        .background(.thinMaterial)        // blurred panel, always readable
+                        .cornerRadius(12)
+                        .padding(.bottom,6)               // small gap above keyboard
+                        .transition(.move(edge: .bottom))
+                    }
+                    .zIndex(2)                            // sits above backdrop layer
+                    .animation(.easeInOut, value: isEditorFocused || isPromptFocused)
+                }
+            } // ZStack
+            
             .navigationTitle("functions.js")
+            //----------------------------------------------------------------------
+            //  toolbars, alerts, sheets … (unchanged)
+            //----------------------------------------------------------------------
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("保存") {
@@ -267,7 +384,11 @@ struct HelperEditorView: View {
                 
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("收起键盘") { isEditorFocused = false }
+                    Button {
+                        isEditorFocused = false
+                    } label: {
+                        Image(systemName: "keyboard.chevron.compact.down")
+                    }
                 }
             }
             // New file sheet
@@ -275,7 +396,11 @@ struct HelperEditorView: View {
                 TextField("文件名", text: $newFileName)
                 Button("创建") {
                     let name = newFileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !name.isEmpty { store.create("// \(name).js\n", named: name) }
+                    if !name.isEmpty {
+                        withAnimation(.spring) {
+                            store.create("// \(name).js\n", named: name) // new file
+                        }
+                    }
                     newFileName = ""
                     refreshDraft()
                 }
@@ -291,7 +416,21 @@ struct HelperEditorView: View {
                 }
                 Button("取消", role: .cancel) { newFileName = "" }
             }, message: { Text("输入新的文件名") })
-        }
+//            Attach the generation failure alert
+            .alert("生成失败", isPresented: Binding(
+                get: { genError != nil },
+                set: { if !$0 { genError = nil } }
+            )) {
+                Button("好") { genError = nil }
+            } message: {
+                // Alert width is controlled by UIKit; to show more text simply put
+                Text(genError ?? "").font(.callout).lineLimit(nil)
+            }
+            
+            .onAppear { refreshDraft() }
+            .onDisappear { saveTask?.cancel() }
+        } // NavigationStack
+        
     }
 }
 
