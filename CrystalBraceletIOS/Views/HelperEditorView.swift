@@ -2,6 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 import CryptoKit
 
+// A helper PreferenceKey to pass the editor’s frame up the view tree
+private struct EditorFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
 // MARK: - JSFileEntry ----------------------------------------------------
 struct JSFileEntry: Identifiable, Codable, Equatable, Hashable {
     let id: UUID
@@ -129,6 +137,7 @@ struct CodeTextEditor: UIViewRepresentable {
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         tv.autocorrectionType     = .no
         tv.autocapitalizationType = .none
+        tv.keyboardDismissMode    = .interactive   // swipe-down to hide
         tv.delegate = context.coordinator
         context.coordinator.applyHighlight(to: tv)          // initial pass
         return tv
@@ -209,6 +218,8 @@ struct HelperEditorView: View {
     @State private var genPrompt       = ""
     @State private var generating      = false
     @State private var genError:String? = nil
+    
+    @State private var editorFrame: CGRect = .zero
 
     // load draft when selection changes
     private func refreshDraft() {
@@ -246,7 +257,26 @@ struct HelperEditorView: View {
     var body: some View {
         NavigationStack {
             // ───── ZStack lets us place a full-screen tap layer ABOVE the content
+            // Back-tap catcher AT THE BOTTOM  (drawn first = sits behind)
             ZStack {
+                //------------------------------------------------------------------
+                // BACKDROP TAP LAYER
+                //------------------------------------------------------------------
+                if isEditorFocused || isPromptFocused {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture(coordinateSpace: .global) { pt in
+                            // dismiss only if the tap is outside CodeTextEditor’s frame
+                            if !editorFrame.contains(pt) {
+                                isEditorFocused  = false
+                                isPromptFocused  = false
+                                UIApplication.shared.dismissKeyboard()
+                            }
+                        }
+                        .transition(.opacity)
+                }
+                
                 //------------------------------------------------------------------
                 // ORIGINAL PAGE CONTENT (unchanged) -- your VStack with file tabs,
                 // CodeTextEditor, etc.
@@ -297,6 +327,15 @@ struct HelperEditorView: View {
                     
                     CodeTextEditor(text: $draft)
                         .focused($isEditorFocused)
+                        .background(                               // 🔎 publish its frame
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: EditorFrameKey.self,
+                                    value: proxy.frame(in: .global)
+                                )
+                            }
+                        )
+                        .onPreferenceChange(EditorFrameKey.self) { editorFrame = $0 }
                         .onChange(of: draft) { newValue in                  // NEW
                             // cancel any previous 2-second countdown
                             // Auto-save every 2 s while typing
@@ -308,21 +347,6 @@ struct HelperEditorView: View {
                                 savedSnapshot = newValue     // ← clear the red dot
                             }
                        }
-                }
-
-                //------------------------------------------------------------------
-                // BACKDROP TAP LAYER
-                //------------------------------------------------------------------
-                if isEditorFocused || isPromptFocused {
-                    Color.clear
-                        .contentShape(Rectangle())        // make whole sheet tappable
-                        .ignoresSafeArea()
-                        .onTapGesture {
-                            isEditorFocused = false
-                            isPromptFocused = false
-                            UIApplication.shared.dismissKeyboard()
-                        }
-                        .transition(.opacity)
                 }
 
                 //------------------------------------------------------------------
@@ -386,6 +410,7 @@ struct HelperEditorView: View {
                     Spacer()
                     Button {
                         isEditorFocused = false
+                        UIApplication.shared.dismissKeyboard()   // ← ensure keyboard really hides
                     } label: {
                         Image(systemName: "keyboard.chevron.compact.down")
                     }
